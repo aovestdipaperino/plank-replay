@@ -1,0 +1,19 @@
+[package]
+name = "plank-replay"
+version = "0.1.0"
+edition = "2024"
+authors = ["Enzo Lombardi <enzinol@gmail.com>"]
+description = "Parses plank repro files and replays their file edits to reconstruct the workspace"
+repository = "https://github.com/aovestdipaperino/plank-replay"
+license = "MIT"
+
+[dependencies]
+
+[lints.rust]
+missing_debug_implementations = "warn"
+unsafe_op_in_unsafe_fn = "warn"
+unused_lifetimes = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+perf = { level = "warn", priority = -1 }
