@@ -181,7 +181,7 @@ pub fn parse_str(text: &str) -> Result<Repro, ReplayError> {
 }
 
 /// Collects `- key: value` pairs from the report header.
-fn parse_meta(lines: &[&str]) -> BTreeMap<String, String> {
+pub(crate) fn parse_meta(lines: &[&str]) -> BTreeMap<String, String> {
     let mut meta = BTreeMap::new();
     for line in lines {
         let Some(rest) = line.strip_prefix("- ") else {

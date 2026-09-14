@@ -33,7 +33,19 @@ test result: ok. 24 passed; 0 failed
 ## Install
 
 ```
+cargo install plank-replay
+```
+
+Or from a clone:
+
+```
 cargo install --path .
+```
+
+As a library dependency:
+
+```
+cargo add plank-replay
 ```
 
 No dependencies beyond the standard library. Rust 2024 edition.
@@ -45,6 +57,8 @@ plank-replay <repro.md> [-o DIR] [OPTIONS]
 
   -o, --out DIR       Output directory (default: ./replay-<repro stem>)
   -l, --list          List the recorded calls without touching the filesystem
+      --stats         Print a one-page summary of the session and exit
+      --no-color      Never colour the --stats report
       --no-seed       Do not restore pre-existing files from `read` tool results
       --run-bash      Also execute the recorded bash commands in the output dir
       --stop-on-error Abort at the first failing call
@@ -53,6 +67,34 @@ plank-replay <repro.md> [-o DIR] [OPTIONS]
 ```
 
 The exit status is non-zero when any call failed, so a replay can gate a script.
+
+## Reading a session at a glance
+
+`--stats` parses the repro and prints a single page instead of rebuilding anything. It
+opens with the prompt the session started from, recovered from the last human turn before
+the model first answered, with the date, hook context, and agent instructions plank
+injects around it stripped away. Then it reports the model and sampling settings, how much of the context window the session ended
+on, and the generation passes: tokens emitted, decode throughput averaged over decode time
+only, reasoning bytes the loop guard saw, and a histogram of why each pass stopped. Below
+that it counts every tool result in the transcript by tool, tallies clean and non-zero
+shell exits, and lists the `Tool error:` messages the model was handed, including loop
+guard refusals. It closes with what a real replay would rebuild and the wall-clock span of
+the transcript.
+
+```
+plank-replay --stats ~/.plank/repro/repro-debug-1789414920.md
+```
+
+An `outcome` line states how the session ended, read from the stop reason of the last
+generation pass: `goal reached` in green when the model answered instead of calling another
+tool, and red for `interrupted by user` or `cut by a loop guard`. Beside it is the wall
+time the transcript spans and, of that, how much was spent generating.
+
+The report is coloured when it goes to a terminal, and plain when it is piped, redirected,
+or `NO_COLOR` is set; `--no-color` forces plain.
+
+Older repros predate the passes table; the report then prints the sections it can fill and
+says so for the rest.
 
 ## What gets replayed
 

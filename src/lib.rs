@@ -10,8 +10,10 @@ pub mod error;
 pub mod parse;
 pub mod replay;
 pub mod seed;
+pub mod stats;
 
 pub use error::ReplayError;
 pub use parse::{Call, Event, Repro, parse_repro};
 pub use replay::{Outcome, Replayer, StepReport};
 pub use seed::Seed;
+pub use stats::{Pass, Stats, Style, Verdict};

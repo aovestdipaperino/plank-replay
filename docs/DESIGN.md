@@ -176,6 +176,62 @@ the second dialect and the seeding opportunity were found in the first place. Th
 end-to-end check is stronger still: replay a session that built a Rust project, then run
 `cargo test` in the output and confirm the suite the session wrote still passes.
 
+## Summarising a session
+
+`--stats` answers a different question from a replay: not "what did this session build"
+but "how did it go". It shares the parser and adds nothing to the effects layer, because
+the report is read-only by construction — `stats` takes the document and the decoded event
+stream and returns a string.
+
+```mermaid
+flowchart TD
+    A[repro.md] --> B[header before the transcript]
+    A --> C[transcript body]
+    B --> D[metadata lines]
+    B --> E[Passes table]
+    C --> F[turn markers and timestamps]
+    C --> G[tool result lines]
+    C --> H[Tool error lines]
+    D --> I[Stats]
+    E --> I
+    F --> I
+    G --> I
+    H --> I
+    I --> J[rendered page]
+```
+
+Three decisions are worth recording.
+
+Tool usage is counted from the `Tool result N (name):` lines the transcript carries, not
+from the decoded calls. The decoder understands the DSML dialects only, so a qwen-dialect
+session decodes to zero calls while its transcript still shows every tool it ran. Counting
+the results keeps the report honest across dialects, and the decoded calls stay in their
+own section, where the number genuinely means "what a replay would rebuild".
+
+Throughput is reported twice, because one number is misleading on its own. The average
+tok/s divides tokens by the decode time implied by each pass's own rate, so it describes
+the engine; the wall figure divides the same tokens by the transcript span, so it describes
+the session, thinking and tool round-trips and idle time included. An eight-hour session
+that spent forty minutes generating is exactly the case the two numbers are there to make
+visible.
+
+A summary must not fail where a replay would. A truncated session can carry an
+unterminated tool call, which is a hard error for the replayer and merely a missing section
+for the report, so `Stats::of` keeps the decode failure as a note and reports everything
+the header and the transcript still hold.
+
+The prompt is recovered rather than recorded. plank wraps a turn in `<hook_context>` or
+`<system-reminder>` envelopes and opens a session with generated turns — the date, the
+agent instructions assembled from `CLAUDE.md` — so the prompt is the last user turn before
+the model first answers, with the envelopes stripped and the generated turns skipped. The
+same rule recovers a sub-agent's delegated task, which arrives as a reminder followed by
+the task text. A session that was quit before anything was typed correctly yields nothing.
+
+The verdict comes from the stop reason of the last pass: `answer` means the model stopped
+calling tools and replied, which is the only outcome painted green. Colour is chosen from
+the stream, not from a flag alone — a terminal gets ANSI, a pipe or `NO_COLOR` gets plain
+text — so the page stays greppable by default when it is redirected.
+
 ## What this is not
 
 plank-replay reconstructs files, not sessions. It does not re-run the model, does not

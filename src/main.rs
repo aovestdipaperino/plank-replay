@@ -1,10 +1,11 @@
 //! Command-line front end: parse a plank repro and rebuild its workspace.
 
 use std::collections::BTreeSet;
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use plank_replay::{Outcome, Replayer, parse_repro};
+use plank_replay::{Outcome, Replayer, Stats, Style, parse::parse_str};
 
 /// Usage text shown for `--help` and on argument errors.
 const USAGE: &str = "\
@@ -20,11 +21,14 @@ ARGS:
 OPTIONS:
     -o, --out DIR       Output directory (default: ./replay-<repro stem>)
     -l, --list          List the recorded calls without touching the filesystem
+        --stats         Print a one-page summary of the session without writing
+                        anything: throughput, tool usage, guard and tool errors
         --no-seed       Do not restore pre-existing files from `read` tool results
         --run-bash      Also execute the recorded bash commands in the output dir
         --stop-on-error Abort at the first failing call
     -f, --force         Reuse a non-empty output directory
     -q, --quiet         Only print the summary
+        --no-color      Never colour the --stats report
     -h, --help          Show this help
 ";
 
@@ -38,6 +42,8 @@ struct Args {
     repro: PathBuf,
     out: Option<PathBuf>,
     list: bool,
+    stats: bool,
+    no_color: bool,
     run_bash: bool,
     stop_on_error: bool,
     force: bool,
@@ -71,14 +77,17 @@ fn main() -> ExitCode {
 fn parse_args() -> Result<Option<Args>, String> {
     let mut repro = None;
     let mut out = None;
-    let (mut list, mut run_bash, mut stop_on_error, mut force, mut quiet, mut no_seed) =
-        (false, false, false, false, false, false);
+    let (mut list, mut stats, mut no_color) = (false, false, false);
+    let (mut run_bash, mut stop_on_error, mut force, mut quiet, mut no_seed) =
+        (false, false, false, false, false);
 
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "-h" | "--help" => return Ok(None),
             "-l" | "--list" => list = true,
+            "--stats" => stats = true,
+            "--no-color" => no_color = true,
             "--run-bash" => run_bash = true,
             "--stop-on-error" => stop_on_error = true,
             "-f" | "--force" => force = true,
@@ -98,6 +107,8 @@ fn parse_args() -> Result<Option<Args>, String> {
         repro,
         out,
         list,
+        stats,
+        no_color,
         run_bash,
         stop_on_error,
         force,
@@ -108,7 +119,19 @@ fn parse_args() -> Result<Option<Args>, String> {
 
 /// Parses the repro and either lists or replays it.
 fn run(args: &Args) -> Result<ExitCode, String> {
-    let repro = parse_repro(&args.repro).map_err(|e| e.to_string())?;
+    let text = std::fs::read_to_string(&args.repro)
+        .map_err(|e| format!("{}: {e}", args.repro.display()))?;
+    if args.stats {
+        let style = if args.no_color {
+            Style::plain()
+        } else {
+            Style::detect(std::io::stdout().is_terminal())
+        };
+        print!("{}", Stats::of(&text).render(&args.repro, style));
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let repro = parse_str(&text).map_err(|e| e.to_string())?;
 
     if !args.quiet {
         let label = |k: &str| repro.meta(k).unwrap_or("?");
