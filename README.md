@@ -1,9 +1,14 @@
-# plank-replay
+<p align="center">
+  <img src="assets/logo.svg" alt="plank-replay logo" width="140">
+</p>
 
-Rebuild the workspace a [plank](https://plank-agent.dev) session produced, from the repro
-file it left behind.
+<h1 align="center">plank-replay</h1>
 
-When a plank session ends it writes a report into `~/.plank/repro/` containing the exact
+<p align="center">
+  <em>Rebuild the workspace a plank session produced, from the repro file it left behind.</em>
+</p>
+
+When a [plank](https://plank-agent.dev) session ends it writes a report into `~/.plank/repro/` containing the exact
 engine transcript. Everything the model built is in there, but only as a sequence of tool
 calls. plank-replay decodes those calls and applies them to a fresh directory, so the
 session's output becomes a tree you can actually compile.

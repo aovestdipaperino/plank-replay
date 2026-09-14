@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="plank-replay">
+  <title>plank-replay</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4f46e5"/>
+      <stop offset="0.55" stop-color="#0ea5e9"/>
+      <stop offset="1" stop-color="#06b6d4"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="0" y="0" width="512" height="512" rx="112" fill="url(#bg)"/>
+
+  <g fill="none" stroke="#fbbf24" stroke-width="34" stroke-linecap="round">
+    <path d="M 341 108.8 A 170 170 0 1 1 226.5 88.6"/>
+  </g>
+  <path d="M 281.7 78.9 L 222.6 123.8 L 210.8 56.8 Z" fill="#fbbf24"/>
+
+  <path d="M 200 166 H 286 L 326 206 V 332 A 14 14 0 0 1 312 346 H 200 A 14 14 0 0 1 186 332 V 180 A 14 14 0 0 1 200 166 Z" fill="#ffffff"/>
+  <path d="M 286 166 L 326 206 H 286 Z" fill="#bae6fd"/>
+
+  <g fill="#4f46e5">
+    <rect x="212" y="236" width="88" height="13" rx="6.5"/>
+    <rect x="212" y="268" width="88" height="13" rx="6.5"/>
+    <rect x="212" y="300" width="58" height="13" rx="6.5"/>
+  </g>
+</svg>
