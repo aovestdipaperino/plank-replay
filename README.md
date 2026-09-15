@@ -48,7 +48,7 @@ As a library dependency:
 cargo add plank-replay
 ```
 
-No dependencies beyond the standard library. Rust 2024 edition.
+One dependency: `arboard`, for the clipboard write in `--browse`. Rust 2024 edition.
 
 ## Usage
 
@@ -138,6 +138,7 @@ plank-replay --browse
 | `J`/`K` | Scroll the report panel |
 | `⌫` | Delete the selected repro, after a `y/N` confirmation |
 | `u` | Upload the selected repro to a secret GitHub gist |
+| `c` | Copy the selected repro's full path to the system clipboard |
 | `r` | Re-read the directory |
 | `q` | Quit |
 
@@ -146,8 +147,8 @@ Deletion is permanent and does not go through the trash. The upload shells out t
 gist it creates is secret, not public, since a repro embeds the session's whole transcript.
 The resulting URL is printed in the status bar.
 
-The browser drives the terminal with plain ANSI escapes and `stty`, so it adds no
-dependencies, and it restores the terminal on every exit path.
+The browser drives the terminal with plain ANSI escapes and `stty`; the clipboard
+write goes through the `arboard` crate. It restores the terminal on every exit path.
 
 ## What gets replayed
 

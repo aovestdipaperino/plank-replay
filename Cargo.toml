@@ -8,6 +8,7 @@ repository = "https://github.com/aovestdipaperino/plank-replay"
 license = "MIT"
 
 [dependencies]
+arboard = "3"
 
 [lints.rust]
 missing_debug_implementations = "warn"

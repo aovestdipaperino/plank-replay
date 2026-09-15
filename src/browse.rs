@@ -2,12 +2,13 @@
 //!
 //! [`browse`] lists every `*.md` in the repro folder, newest first, and paints
 //! the [`Stats`](crate::stats::Stats) report of the highlighted entry in a side
-//! panel. Backspace deletes the selected repro after a confirmation, and `u`
-//! uploads it to a secret GitHub gist through the `gh` command line tool.
+//! panel. Backspace deletes the selected repro after a confirmation, `u`
+//! uploads it to a secret GitHub gist through the `gh` command line tool, and
+//! `c` copies its full path to the system clipboard.
 //!
-//! The terminal is driven with bare ANSI escapes and `stty`, so the crate keeps
-//! its empty dependency list. Raw mode is restored by [`RawMode`]'s destructor
-//! on every exit path, panics included.
+//! The terminal is driven with bare ANSI escapes and `stty`; only the clipboard
+//! write goes through the `arboard` crate. Raw mode is restored by
+//! [`RawMode`]'s destructor on every exit path, panics included.
 
 use std::fmt::Write as _;
 use std::io::{Read, Write as _};
@@ -296,6 +297,7 @@ impl Browser {
             Key::Char(b'r') => self.reload(),
             Key::Char(0x7f | 0x08) => self.mode = Mode::Confirm,
             Key::Char(b'u' | b'U') => self.upload_selected(),
+            Key::Char(b'c') => self.copy_selected(),
             Key::Char(_) | Key::Other => {}
         }
         !self.entries.is_empty()
@@ -380,6 +382,21 @@ impl Browser {
                 ))
             }
             Err(e) => Mode::Notice(format!("cannot run gh: {e}")),
+        };
+    }
+
+    /// Copies the highlighted repro's full path to the system clipboard.
+    fn copy_selected(&mut self) {
+        let Some(entry) = self.entries.get(self.cursor) else {
+            return;
+        };
+        let path = entry.path.display().to_string();
+        self.mode = match arboard::Clipboard::new() {
+            Ok(mut clipboard) => match clipboard.set_text(path.clone()) {
+                Ok(()) => Mode::Notice(format!("copied {path}")),
+                Err(e) => Mode::Notice(format!("cannot copy: {e}")),
+            },
+            Err(e) => Mode::Notice(format!("cannot copy: {e}")),
         };
     }
 
@@ -514,7 +531,7 @@ impl Browser {
                 format!("{}{}{}", style.value, clip(text, cols), style.off)
             }
             Mode::Normal => format!(
-                "{}\u{2191}\u{2193}/jk move  J/K scroll report  \u{232b} delete  u gist  r reload  q quit{}",
+                "{}\u{2191}\u{2193}/jk move  J/K scroll report  \u{232b} delete  u gist  c copy path  r reload  q quit{}",
                 style.dim, style.off
             ),
         }
@@ -702,7 +719,23 @@ fn clip(line: &str, width: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::clip;
+    use super::{Browser, Mode, Style, clip};
+    use std::path::PathBuf;
+
+    #[test]
+    fn status_legend_lists_copy_command() {
+        let browser = Browser {
+            dir: PathBuf::from("/tmp"),
+            entries: vec![],
+            cursor: 0,
+            top: 0,
+            panel: 0,
+            cached: None,
+            mode: Mode::Normal,
+            style: Style::plain(),
+        };
+        assert!(browser.status(100).contains("c copy path"));
+    }
 
     #[test]
     fn clip_counts_only_visible_characters() {
