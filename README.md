@@ -54,9 +54,11 @@ No dependencies beyond the standard library. Rust 2024 edition.
 
 ```
 plank-replay <repro.md> [-o DIR] [OPTIONS]
+plank-replay --browse [DIR]
 
   -o, --out DIR       Output directory (default: ./replay-<repro stem>)
   -l, --list          List the recorded calls without touching the filesystem
+      --browse        Browse a repro directory in a full-screen TUI
       --stats         Print a one-page summary of the session and exit
       --no-color      Never colour the --stats report
       --no-seed       Do not restore pre-existing files from `read` tool results
@@ -95,6 +97,57 @@ or `NO_COLOR` is set; `--no-color` forces plain.
 
 Older repros predate the passes table; the report then prints the sections it can fill and
 says so for the rest.
+
+## Browsing the repro folder
+
+`--browse` opens a full-screen browser over a directory of repros, `~/.plank/repro` unless
+another is given. The left pane lists every `*.md` newest first; the right pane shows the
+highlighted repro's `--stats` report, led by the things that identify a session at a glance:
+the prompt it started from, the model that ran it, whether skills were enabled, when it ran,
+and how long it took.
+
+```
+PROMPT
+  write the game described in SNAKE-PROMPT.md
+
+MODEL   Qwen3.8 Flash Next
+  family qwen   dialect qwen   think low
+
+SKILLS  enabled, 1 invocation
+
+WHEN    2026-09-15  09:47:19 -> 10:00:29
+
+TIME    13m 10s   generating 9m 44s
+```
+
+`SKILLS` reads the tool schema plank writes into the transcript: a declared `skill` tool
+means the session was offered skills, and the invocation count comes from the tool results.
+A session that had skills available but never reached for them reads `enabled, never
+invoked`, which is the interesting case when comparing runs. `WHEN` uses the transcript's
+first and last timestamps rather than the header date, and collapses to a single day when
+the session did not cross midnight.
+
+```
+plank-replay --browse
+```
+
+| Key | Action |
+|---|---|
+| `↑`/`↓`, `j`/`k` | Move the selection |
+| `PgUp`/`PgDn`, `g`/`G` | Page, or jump to the first or last repro |
+| `J`/`K` | Scroll the report panel |
+| `⌫` | Delete the selected repro, after a `y/N` confirmation |
+| `u` | Upload the selected repro to a secret GitHub gist |
+| `r` | Re-read the directory |
+| `q` | Quit |
+
+Deletion is permanent and does not go through the trash. The upload shells out to the
+[`gh`](https://cli.github.com) command line tool and needs it installed and logged in; the
+gist it creates is secret, not public, since a repro embeds the session's whole transcript.
+The resulting URL is printed in the status bar.
+
+The browser drives the terminal with plain ANSI escapes and `stty`, so it adds no
+dependencies, and it restores the terminal on every exit path.
 
 ## What gets replayed
 

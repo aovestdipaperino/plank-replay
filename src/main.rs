@@ -13,14 +13,19 @@ plank-replay - rebuild the workspace a plank repro recorded
 
 USAGE:
     plank-replay <repro.md> [-o DIR] [OPTIONS]
+    plank-replay --browse [DIR]
 
 ARGS:
     <repro.md>          Path to a plank repro file, e.g.
                         ~/.plank/repro/repro-debug-1789376559.md
+                        With --browse, a directory of repro files instead
+                        (default: ~/.plank/repro)
 
 OPTIONS:
     -o, --out DIR       Output directory (default: ./replay-<repro stem>)
     -l, --list          List the recorded calls without touching the filesystem
+        --browse        Browse a repro directory in a full-screen TUI, with the
+                        --stats report of the highlighted repro in a side panel
         --stats         Print a one-page summary of the session without writing
                         anything: throughput, tool usage, guard and tool errors
         --no-seed       Do not restore pre-existing files from `read` tool results
@@ -39,10 +44,11 @@ OPTIONS:
     reason = "each bool is an independent CLI flag"
 )]
 struct Args {
-    repro: PathBuf,
+    repro: Option<PathBuf>,
     out: Option<PathBuf>,
     list: bool,
     stats: bool,
+    browse: bool,
     no_color: bool,
     run_bash: bool,
     stop_on_error: bool,
@@ -77,7 +83,7 @@ fn main() -> ExitCode {
 fn parse_args() -> Result<Option<Args>, String> {
     let mut repro = None;
     let mut out = None;
-    let (mut list, mut stats, mut no_color) = (false, false, false);
+    let (mut list, mut stats, mut no_color, mut browse) = (false, false, false, false);
     let (mut run_bash, mut stop_on_error, mut force, mut quiet, mut no_seed) =
         (false, false, false, false, false);
 
@@ -87,6 +93,7 @@ fn parse_args() -> Result<Option<Args>, String> {
             "-h" | "--help" => return Ok(None),
             "-l" | "--list" => list = true,
             "--stats" => stats = true,
+            "--browse" => browse = true,
             "--no-color" => no_color = true,
             "--run-bash" => run_bash = true,
             "--stop-on-error" => stop_on_error = true,
@@ -102,12 +109,15 @@ fn parse_args() -> Result<Option<Args>, String> {
         }
     }
 
-    let repro = repro.ok_or("a repro file is required")?;
+    if repro.is_none() && !browse {
+        return Err("a repro file is required".into());
+    }
     Ok(Some(Args {
         repro,
         out,
         list,
         stats,
+        browse,
         no_color,
         run_bash,
         stop_on_error,
@@ -119,15 +129,29 @@ fn parse_args() -> Result<Option<Args>, String> {
 
 /// Parses the repro and either lists or replays it.
 fn run(args: &Args) -> Result<ExitCode, String> {
-    let text = std::fs::read_to_string(&args.repro)
-        .map_err(|e| format!("{}: {e}", args.repro.display()))?;
+    if args.browse {
+        let dir = args.repro.clone().unwrap_or_else(default_repro_dir);
+        let colour = !args.no_color
+            && std::io::stdout().is_terminal()
+            && std::env::var_os("NO_COLOR").is_none();
+        plank_replay::browse(&dir, colour)?;
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let repro_path = args
+        .repro
+        .as_ref()
+        .ok_or("a repro file is required")?
+        .clone();
+    let text = std::fs::read_to_string(&repro_path)
+        .map_err(|e| format!("{}: {e}", repro_path.display()))?;
     if args.stats {
         let style = if args.no_color {
             Style::plain()
         } else {
             Style::detect(std::io::stdout().is_terminal())
         };
-        print!("{}", Stats::of(&text).render(&args.repro, style));
+        print!("{}", Stats::of(&text).render(&repro_path, style));
         return Ok(ExitCode::SUCCESS);
     }
 
@@ -137,7 +161,7 @@ fn run(args: &Args) -> Result<ExitCode, String> {
         let label = |k: &str| repro.meta(k).unwrap_or("?");
         println!(
             "repro : {}\nsession: {}   date: {}   model: {}",
-            args.repro.display(),
+            repro_path.display(),
             label("session"),
             label("date"),
             label("name"),
@@ -167,7 +191,7 @@ fn run(args: &Args) -> Result<ExitCode, String> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    let out = args.out.clone().unwrap_or_else(|| default_out(&args.repro));
+    let out = args.out.clone().unwrap_or_else(|| default_out(&repro_path));
     prepare_out(&out, args.force)?;
 
     let replayer = Replayer::new(&out)
@@ -213,6 +237,12 @@ fn run(args: &Args) -> Result<ExitCode, String> {
     } else {
         ExitCode::FAILURE
     })
+}
+
+/// The directory plank writes its repro reports into.
+fn default_repro_dir() -> PathBuf {
+    let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("."), PathBuf::from);
+    home.join(".plank").join("repro")
 }
 
 /// Derives `./replay-<stem>` from the repro file name.

@@ -201,6 +201,13 @@ pub struct Stats {
     pub parse_note: Option<String>,
     /// The prompt the session started from, as the human typed it.
     pub prompt: Option<String>,
+    /// Whether the session was offered the `skill` tool.
+    ///
+    /// True when the transcript's tool schema declares a tool named `skill`,
+    /// which is how plank advertises an enabled skill set to the model. It says
+    /// nothing about whether any skill was actually invoked; `tools["skill"]`
+    /// counts that.
+    pub skills: bool,
 }
 
 impl Stats {
@@ -240,6 +247,7 @@ impl Stats {
             lines: lines.len(),
             ..Self::default()
         };
+        stats.skills = declares_skill_tool(&lines[body.clone()]);
         stats.read_passes(&lines[..begin.unwrap_or(lines.len())]);
         stats.read_transcript(&lines[body]);
         stats.read_events(repro);
@@ -884,8 +892,24 @@ fn histogram(
     }
 }
 
+/// Reports whether the transcript's tool schema declares a `skill` tool.
+///
+/// plank writes the tool list into the first system turn as JSON, so an
+/// enabled skill set shows up as a `"name": "skill"` member. Whitespace around
+/// the colon varies between tool dialects, so the match is made on a trimmed
+/// line rather than on one exact spelling.
+fn declares_skill_tool(body: &[&str]) -> bool {
+    body.iter().any(|line| {
+        let trimmed = line.trim_start();
+        trimmed.starts_with("\"name\"")
+            && trimmed
+                .split_once(':')
+                .is_some_and(|(_, value)| value.trim_start().starts_with("\"skill\""))
+    })
+}
+
 /// Formats a byte count in the largest unit that keeps it readable.
-fn human_bytes(bytes: usize) -> String {
+pub(crate) fn human_bytes(bytes: usize) -> String {
     match bytes {
         0..1024 => format!("{bytes} B"),
         b if b < 1024 * 1024 => format!("{:.1} KiB", b as f64 / 1024.0),
@@ -924,12 +948,12 @@ fn parse_delta(text: &str) -> Option<u64> {
     clippy::cast_sign_loss,
     reason = "clamped to a non-negative range a u64 holds"
 )]
-fn whole_seconds(seconds: f64) -> u64 {
+pub(crate) fn whole_seconds(seconds: f64) -> u64 {
     seconds.round().clamp(0.0, 1e18) as u64
 }
 
 /// Formats a duration in seconds as `1h 02m 03s`, dropping empty leading units.
-fn human_time(seconds: u64) -> String {
+pub(crate) fn human_time(seconds: u64) -> String {
     let (h, m, s) = (seconds / 3600, (seconds % 3600) / 60, seconds % 60);
     if h > 0 {
         format!("{h}h {m:02}m {s:02}s")
@@ -1026,6 +1050,22 @@ Tool error: refused by loop guard - same call twice
         assert_eq!(stats.tools.get("edit"), Some(&1));
         assert_eq!(stats.failed_shells, 1);
         assert_eq!(stats.ok_shells, 0);
+    }
+
+    #[test]
+    fn spots_the_skill_tool_in_the_schema() {
+        assert!(super::declares_skill_tool(&["    \"name\": \"skill\","]));
+        assert!(super::declares_skill_tool(&["\"name\":\"skill\""]));
+    }
+
+    #[test]
+    fn does_not_mistake_other_tools_for_skills() {
+        assert!(!super::declares_skill_tool(&["    \"name\": \"bash\","]));
+        // A skill mentioned as a value elsewhere is not a declaration.
+        assert!(!super::declares_skill_tool(&[
+            "    \"description\": \"invoke a skill\","
+        ]));
+        assert!(!super::declares_skill_tool(&["\"skill\": \"name\""]));
     }
 
     #[test]
