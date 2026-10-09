@@ -63,6 +63,7 @@ pt help <command>
   replay     Rebuild the workspace a repro recorded
   stats      Print a one-page summary of a recorded session
   browse     Browse a repro directory in a full-screen TUI
+  install    Install steering vectors or a profile from a repository
   vectorize  Build a steering vector for a model from two prompt sets
 ```
 
@@ -344,6 +345,42 @@ On the published Vision-Exp abliteration (33 `Q8_0` `attn_output_b` tensors, rec
 the base model steered with the result answers like the abliterated one: on refusal
 prompts its next-token distribution moved from a total-variation distance of 0.98 from the
 abliterated model's to under 0.1.
+
+## Installing vectors and profiles
+
+`pt install <repo>:<path>` installs what someone else built: a vectors file, merged into
+`~/.plank/models/vectors.json`, or a plank profile, copied into `~/.plank/profiles`.
+
+```
+pt install aovestdipaperino/plank-profiles:/profiles/3v1l
+pt install ~/Code/my-vectors:ds4vision/vectors.json
+```
+
+The repository is a local folder, a GitHub `owner/repo` (cloned shallowly into a temporary
+folder that is removed afterwards) or any git URL, and the path is a file or folder inside
+it that may not climb out with `..`. A vectors file is the same shape as the store, a JSON
+array of `{model, vectors: [{name, value}]}`, and every value is checked to be base64 of
+whole `f32`s before anything is merged. A profile is a folder with a
+`.plank-plugin/plugin.json` declaring a `profile`; the path may name that file, its folder
+or the profile folder. It is installed under its plugin name with a `.plank-source` record
+of where it came from, the same record plank writes, so `plank --profile <owner/repo:folder>`
+launches the installed copy. A `vectors.json` inside the profile folder is merged as well,
+and when the profile steers along a direction the store still does not hold for its
+`recommendedModel`, a warning says so before plank would stop at launch over it.
+
+Installing is careful about what is already there. Something identical is reported as
+unchanged and left alone; a profile is compared file by file, ignoring its source record.
+Anything that would replace something different, a vector stored with another value or an
+installed profile whose files differ, is listed with what is known about both, and you are
+asked to skip or overwrite it, one at a time or all at once. Every question is asked before
+anything is written, so answering no, or interrupting, leaves everything as it was. Without
+a terminal there is nobody to ask: `pt install` then stops unless `--skip` or `--overwrite`
+says what to do. A profile is replaced by staging the new copy beside the old one and
+swapping them by rename, and a symlink in a fetched profile is refused, since it could point
+anywhere on this machine.
+
+Both files are handled by `plank-lib` (`../plank/crates/plank-lib`), the crate plank reads
+them with, so the two programs cannot disagree about their format.
 
 ## What gets replayed
 

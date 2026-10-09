@@ -2,6 +2,7 @@
 //! adding a tool means adding a module and an entry in [`COMMANDS`].
 
 mod browse;
+mod install;
 mod replay;
 mod stats;
 mod vecdiff;
@@ -43,6 +44,12 @@ pub const COMMANDS: &[Command] = &[
         summary: "Browse a repro directory in a full-screen TUI",
         usage: browse::USAGE,
         run: browse::run,
+    },
+    Command {
+        name: "install",
+        summary: "Install steering vectors or a profile from a repository",
+        usage: install::USAGE,
+        run: install::run,
     },
     Command {
         name: "vectorize",

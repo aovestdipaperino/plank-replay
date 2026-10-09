@@ -58,16 +58,7 @@ pub use store::VectorStore;
 /// `/Users/.plank` when only that exists, else `~/.plank` (or `./.plank`
 /// without `HOME`).
 pub(crate) fn plank_dir() -> PathBuf {
-    let Some(home) = std::env::var_os("HOME") else {
-        return PathBuf::from(".").join(".plank");
-    };
-    let primary = PathBuf::from(home).join(".plank");
-    let shared = PathBuf::from("/Users/.plank");
-    if !primary.is_dir() && shared.is_dir() {
-        shared
-    } else {
-        primary
-    }
+    plank_lib::home::plank_dir()
 }
 
 /// Anything that stops a steering vector from being built.
@@ -122,6 +113,12 @@ impl fmt::Display for VectorizeError {
             ErrorKind::Io { path, source } => write!(f, "{}: {source}", path.display()),
             ErrorKind::Message(message) => f.write_str(message),
         }
+    }
+}
+
+impl From<plank_lib::Error> for VectorizeError {
+    fn from(e: plank_lib::Error) -> Self {
+        Self::msg(e.to_string())
     }
 }
 

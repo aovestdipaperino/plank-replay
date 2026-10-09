@@ -17,6 +17,9 @@ path = "src/main.rs"
 # repo. Gemma support is left off: activation capture is ds4-only, and the
 # Gemma backend would pull in candle for nothing.
 local-inference-engine = { path = "../plank/crates/local-inference-engine", default-features = false }
+# plank's user files (vectors.json, installed profiles), shared with plank so
+# both read and write them the same way.
+plank-lib = { path = "../plank/crates/plank-lib" }
 libc = "0.2"
 # Dequantizes GGUF tensors and runs the Gram matrices of `pt vectorize --diff`
 # (Metal on macOS).
