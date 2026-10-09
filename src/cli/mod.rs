@@ -4,6 +4,7 @@
 mod browse;
 mod replay;
 mod stats;
+mod vecdiff;
 mod vectorize;
 
 use std::io::IsTerminal;

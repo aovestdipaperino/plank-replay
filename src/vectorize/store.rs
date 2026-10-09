@@ -1,12 +1,12 @@
 //! Named steering vectors kept in `~/.plank/models/vectors.json`.
 //!
-//! The file is a JSON array with one entry per model file, each holding its
+//! The file is a JSON array with one entry per model, each holding its
 //! named vectors as base64 of the raw little-endian `f32` matrix:
 //!
 //! ```json
 //! [
 //!   {
-//!     "model": "ds4vision.gguf",
+//!     "model": "ds4vision",
 //!     "vectors": [
 //!       { "name": "succinct", "value": "AACAPwAAAAA..." }
 //!     ]
@@ -36,14 +36,10 @@ impl VectorStore {
         Self { path: path.into() }
     }
 
-    /// `~/.plank/models/vectors.json`, or `./.plank/…` when `HOME` is unset.
+    /// `models/vectors.json` under the plank home (`~/.plank`).
     #[must_use]
     pub fn default_path() -> PathBuf {
-        std::env::var_os("HOME")
-            .map_or_else(|| PathBuf::from("."), PathBuf::from)
-            .join(".plank")
-            .join("models")
-            .join("vectors.json")
+        super::plank_dir().join("models").join("vectors.json")
     }
 
     /// The file this store reads and writes.
@@ -212,6 +208,8 @@ mod tests {
         name: "tiny",
         layers: 1,
         width: 2,
+        residual_dump: "ffn_out",
+        residual_branches: 1,
     };
 
     fn direction(x: f32) -> Direction {

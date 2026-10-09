@@ -14,32 +14,50 @@ use local_inference_engine::{Family, Model, Options, Session, Think};
 use super::{Profile, VectorizeError};
 
 /// The activation stream a direction is extracted from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Component {
-    /// Output of each layer's FFN; the usual target, applied with `ffn`.
+    /// The residual stream after each layer, what heretic measures; the
+    /// direction is applied to the FFN output with `ffn`, as heretic ablates
+    /// each layer's MLP output against the residual direction after it.
     #[default]
+    Residual,
+    /// The dump ds4 calls `ffn_out`, which `build_direction.py` reads: the
+    /// FFN block's output on `DeepSeek`, the post-layer residual on GLM and Qwen.
     FfnOut,
     /// Output of each layer's attention projection; applied with `attn`.
     AttnOut,
 }
 
 impl Component {
-    /// The ds4 dump name, as passed in `DS4_METAL_GRAPH_DUMP_NAME`.
+    /// The name `--component` takes.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Residual => "residual",
             Self::FfnOut => "ffn_out",
             Self::AttnOut => "attn_out",
         }
     }
 
-    /// Parses `ffn_out` or `attn_out`.
+    /// Parses `residual`, `ffn_out` or `attn_out`.
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
         match s {
+            "residual" => Some(Self::Residual),
             "ffn_out" => Some(Self::FfnOut),
             "attn_out" => Some(Self::AttnOut),
             _ => None,
+        }
+    }
+
+    /// The ds4 dump to read for `profile`, and how many hyper-connection
+    /// branches of `width` floats it holds per token.
+    #[must_use]
+    pub fn dump(self, profile: Profile) -> (&'static str, usize) {
+        match self {
+            Self::Residual => (profile.residual_dump, profile.residual_branches),
+            Self::FfnOut => ("ffn_out", 1),
+            Self::AttnOut => ("attn_out", 1),
         }
     }
 }
@@ -74,8 +92,8 @@ pub struct Capture {
     session: Option<Session>,
 }
 
-/// The component the process's dump settings were fixed to, once loaded.
-static DUMPING: Mutex<Option<Component>> = Mutex::new(None);
+/// The dump the process's settings were fixed to, once loaded.
+static DUMPING: Mutex<Option<&'static str>> = Mutex::new(None);
 
 impl Capture {
     /// Prepares captures of `model`.
@@ -87,7 +105,7 @@ impl Capture {
             ctx: 512,
             system: "You are a helpful assistant.".to_string(),
             think: false,
-            component: Component::FfnOut,
+            component: Component::Residual,
             work: std::env::temp_dir().join(format!("pt-vectorize-{}", std::process::id())),
             metal: None,
             session: None,
@@ -213,12 +231,12 @@ impl Capture {
         let mut dumping = DUMPING
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (name, _) = self.component.dump(self.profile);
         match *dumping {
-            Some(c) if c != self.component => {
+            Some(d) if d != name => {
                 return Err(VectorizeError::msg(format!(
-                    "this process already captures {c}; the engine cannot switch to {} \
-                     without a restart",
-                    self.component
+                    "this process already captures {d}; the engine cannot switch to {name} \
+                     without a restart"
                 )));
             }
             Some(_) => return Ok(()),
@@ -229,14 +247,14 @@ impl Capture {
         // that reads the environment is spawned.
         unsafe {
             std::env::set_var("DS4_METAL_GRAPH_DUMP_PREFIX", self.dump_prefix());
-            std::env::set_var("DS4_METAL_GRAPH_DUMP_NAME", self.component.as_str());
+            std::env::set_var("DS4_METAL_GRAPH_DUMP_NAME", name);
             std::env::set_var("DS4_METAL_GRAPH_DUMP_POS", "0");
             std::env::set_var("DS4_QWEN4_PREFILL_CHUNK", chunk);
             if let Some(dir) = &self.metal {
                 std::env::set_var("DS4_METAL_DIR", dir);
             }
         }
-        *dumping = Some(self.component);
+        *dumping = Some(name);
         Ok(())
     }
 
@@ -245,8 +263,8 @@ impl Capture {
     }
 
     fn dump_path(&self, layer: usize) -> PathBuf {
-        self.work
-            .join(format!("dump_{}-{layer}_pos0.bin", self.component))
+        let (name, _) = self.component.dump(self.profile);
+        self.work.join(format!("dump_{name}-{layer}_pos0.bin"))
     }
 
     /// Runs `prompt` and returns `layers * width` floats, layer-major.
@@ -335,6 +353,7 @@ impl Capture {
         }
 
         let w = self.profile.width;
+        let (_, branches) = self.component.dump(self.profile);
         let mut rows = Vec::with_capacity(self.profile.layers * w);
         for layer in 0..self.profile.layers {
             let path = self.dump_path(layer);
@@ -344,13 +363,15 @@ impl Capture {
                     path.display()
                 ))
             })?;
-            rows.extend(last_row(&bytes, w).ok_or_else(|| {
+            let row = last_row(&bytes, w * branches).ok_or_else(|| {
                 VectorizeError::msg(format!(
-                    "{}: {} bytes is not a whole number of {w}-float rows",
+                    "{}: {} bytes is not a whole number of {}-float rows",
                     path.display(),
-                    bytes.len()
+                    bytes.len(),
+                    w * branches
                 ))
-            })?);
+            })?;
+            rows.extend(branch_mean(&row, w));
         }
         Ok(rows)
     }
@@ -431,6 +452,21 @@ impl Drop for Diverted {
     }
 }
 
+/// The mean of the `width`-float branches `row` holds, branch-major as the
+/// hyper-connection kernels lay them out (`d + branch * width`). A row of
+/// one branch is returned as it is.
+fn branch_mean(row: &[f32], width: usize) -> Vec<f32> {
+    let branches = row.len() / width;
+    if branches <= 1 {
+        return row.to_vec();
+    }
+    #[allow(clippy::cast_precision_loss, reason = "a handful of branches")]
+    let inv = 1.0 / branches as f32;
+    (0..width)
+        .map(|d| (0..branches).map(|b| row[b * width + d]).sum::<f32>() * inv)
+        .collect()
+}
+
 /// The last `width` little-endian floats of a dump of whole rows.
 fn last_row(bytes: &[u8], width: usize) -> Option<Vec<f32>> {
     let row = width * 4;
@@ -452,6 +488,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn hyper_connection_branches_are_averaged_per_component() {
+        // Two branches of width 3, branch-major.
+        let row = [1.0, 2.0, 3.0, 3.0, 4.0, 5.0];
+        assert_eq!(branch_mean(&row, 3), [2.0, 3.0, 4.0]);
+        assert_eq!(branch_mean(&row[..3], 3), [1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn the_residual_is_read_from_each_familys_own_dump() {
+        let ds4 = crate::vectorize::Profile::named("deepseek-v4-flash").unwrap();
+        let qwen = crate::vectorize::Profile::named("qwen3.8-flash-next").unwrap();
+        assert_eq!(Component::Residual.dump(ds4), ("hc_ffn_post", 4));
+        assert_eq!(Component::Residual.dump(qwen), ("ffn_out", 1));
+        assert_eq!(Component::FfnOut.dump(ds4), ("ffn_out", 1));
+    }
+
+    #[test]
     fn the_last_row_of_a_multi_row_dump_is_taken() {
         let bytes: Vec<u8> = [1.0f32, 2.0, 3.0, 4.0]
             .iter()
@@ -464,7 +517,7 @@ mod tests {
 
     #[test]
     fn components_round_trip_through_their_names() {
-        for c in [Component::FfnOut, Component::AttnOut] {
+        for c in [Component::Residual, Component::FfnOut, Component::AttnOut] {
             assert_eq!(Component::parse(c.as_str()), Some(c));
         }
         assert_eq!(Component::parse("resid"), None);

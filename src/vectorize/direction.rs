@@ -5,14 +5,23 @@ use std::path::Path;
 
 use super::{Profile, VectorizeError};
 
-/// Running sums over paired target/control captures.
+/// Running sums over target and control captures.
 ///
 /// The direction is `target - control`, optionally made orthogonal to the
 /// control mean. With ds4's projection edit, a positive scale then strips
 /// the target's component from activations that sit near the control.
+///
+/// This is heretic's computation (`modifiers/abliteration.py`) with its
+/// `bad` prompts as the target and its `good` prompts as the control: each
+/// side is averaged over its own captures in `f64`, the difference is
+/// normalized, and with `orthogonalize` (heretic's `orthogonalize_direction`,
+/// on by default there) the part along the normalized control mean is
+/// removed and the result normalized again.
 #[derive(Debug, Clone)]
 pub struct Accumulator {
     profile: Profile,
+    targets: usize,
+    controls: usize,
     pairs: usize,
     target_sum: Vec<f64>,
     control_sum: Vec<f64>,
@@ -26,6 +35,8 @@ impl Accumulator {
         let n = profile.layers * profile.width;
         Self {
             profile,
+            targets: 0,
+            controls: 0,
             pairs: 0,
             target_sum: vec![0.0; n],
             control_sum: vec![0.0; n],
@@ -39,21 +50,47 @@ impl Accumulator {
         self.pairs
     }
 
-    /// Adds one pair of captures, each `layers * width` floats, layer-major.
+    /// Adds one target capture, `layers * width` floats, layer-major.
     ///
     /// # Panics
-    /// Panics if either capture does not match the profile's shape, which
-    /// would be a bug in the caller.
-    pub fn add_pair(&mut self, target: &[f32], control: &[f32]) {
-        let n = self.profile.layers * self.profile.width;
-        assert_eq!(target.len(), n, "target capture has the wrong shape");
-        assert_eq!(control.len(), n, "control capture has the wrong shape");
+    /// Panics if the capture does not match the profile's shape, which would
+    /// be a bug in the caller.
+    pub fn add_target(&mut self, target: &[f32]) {
+        assert_eq!(
+            target.len(),
+            self.target_sum.len(),
+            "target capture has the wrong shape"
+        );
         for (sum, &x) in self.target_sum.iter_mut().zip(target) {
             *sum += f64::from(x);
         }
+        self.targets += 1;
+    }
+
+    /// Adds one control capture, `layers * width` floats, layer-major.
+    ///
+    /// # Panics
+    /// Panics if the capture does not match the profile's shape.
+    pub fn add_control(&mut self, control: &[f32]) {
+        assert_eq!(
+            control.len(),
+            self.control_sum.len(),
+            "control capture has the wrong shape"
+        );
         for (sum, &x) in self.control_sum.iter_mut().zip(control) {
             *sum += f64::from(x);
         }
+        self.controls += 1;
+    }
+
+    /// Adds one target and one control capture as a pair, which is also what
+    /// `pair_normalize` averages over.
+    ///
+    /// # Panics
+    /// Panics if either capture does not match the profile's shape.
+    pub fn add_pair(&mut self, target: &[f32], control: &[f32]) {
+        self.add_target(target);
+        self.add_control(control);
         let w = self.profile.width;
         for layer in 0..self.profile.layers {
             let span = layer * w..(layer + 1) * w;
@@ -79,12 +116,14 @@ impl Accumulator {
     /// encode the baseline activation.
     ///
     /// # Panics
-    /// Panics if no pair has been added.
+    /// Panics if either side has no capture, or `pair_normalize` is asked
+    /// for without pairs.
     #[must_use]
     pub fn finish(&self, orthogonalize: bool, pair_normalize: bool) -> Direction {
-        assert!(self.pairs > 0, "no pairs to average");
-        #[allow(clippy::cast_precision_loss, reason = "pair counts are small")]
-        let n = self.pairs as f64;
+        assert!(self.targets > 0 && self.controls > 0, "nothing to average");
+        assert!(!pair_normalize || self.pairs > 0, "no pairs to normalize");
+        #[allow(clippy::cast_precision_loss, reason = "capture counts are small")]
+        let (nt, nc, n) = (self.targets as f64, self.controls as f64, self.pairs as f64);
         let w = self.profile.width;
         let mut data = Vec::with_capacity(self.profile.layers * w);
         for layer in 0..self.profile.layers {
@@ -95,12 +134,12 @@ impl Accumulator {
                 self.target_sum[span.clone()]
                     .iter()
                     .zip(&self.control_sum[span.clone()])
-                    .map(|(t, f)| t / n - f / n)
+                    .map(|(t, f)| t / nt - f / nc)
                     .collect()
             };
             normalize(&mut dir);
             if orthogonalize {
-                let mut base: Vec<f64> = self.control_sum[span].iter().map(|x| x / n).collect();
+                let mut base: Vec<f64> = self.control_sum[span].iter().map(|x| x / nc).collect();
                 normalize(&mut base);
                 let p = dot(&dir, &base);
                 for (d, b) in dir.iter_mut().zip(&base) {
@@ -118,7 +157,9 @@ impl Accumulator {
     }
 }
 
-/// A finished steering vector: one unit direction per layer.
+/// A finished steering vector: one direction per layer, unit length when
+/// built from captures, scaled by the fitted strength when recovered from a
+/// weight difference.
 #[derive(Debug, Clone)]
 pub struct Direction {
     profile: Profile,
@@ -126,6 +167,20 @@ pub struct Direction {
 }
 
 impl Direction {
+    /// A vector from raw layer-major values, as [`super::diff`] builds them.
+    ///
+    /// # Panics
+    /// Panics if `data` is not `layers * width` floats.
+    #[must_use]
+    pub fn from_values(profile: Profile, data: Vec<f32>) -> Self {
+        assert_eq!(
+            data.len(),
+            profile.layers * profile.width,
+            "values do not match the profile's shape"
+        );
+        Self { profile, data }
+    }
+
     /// The shape the vector was built for.
     #[must_use]
     pub fn profile(&self) -> Profile {
@@ -167,6 +222,45 @@ impl Direction {
     }
 }
 
+/// Heretic's symmetric winsorization, applied to one capture before it is
+/// averaged: per layer, the magnitudes of the `width` components are clamped
+/// to their `quantile`-quantile, computed as `torch.quantile` does (linear
+/// interpolation between the two nearest ranks). It tames the "massive
+/// activations" some models carry in a few components.
+///
+/// # Panics
+/// Panics if `quantile` is outside `0..=1` or the capture is not a whole
+/// number of layers.
+pub fn winsorize(capture: &mut [f32], width: usize, quantile: f64) {
+    assert!((0.0..=1.0).contains(&quantile), "quantile out of range");
+    assert!(
+        width > 0 && capture.len().is_multiple_of(width),
+        "ragged capture"
+    );
+    let mut sorted = vec![0.0f32; width];
+    for layer in capture.chunks_exact_mut(width) {
+        for (s, x) in sorted.iter_mut().zip(layer.iter()) {
+            *s = x.abs();
+        }
+        sorted.sort_unstable_by(f32::total_cmp);
+        #[allow(clippy::cast_precision_loss, reason = "widths are small")]
+        let pos = quantile * (width - 1) as f64;
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "pos lies in 0..width"
+        )]
+        let (lo, hi) = (pos.floor() as usize, pos.ceil() as usize);
+        let frac = pos - pos.floor();
+        #[allow(clippy::cast_possible_truncation, reason = "the capture is f32")]
+        let threshold =
+            (f64::from(sorted[lo]) + (f64::from(sorted[hi]) - f64::from(sorted[lo])) * frac) as f32;
+        for x in layer.iter_mut() {
+            *x = x.clamp(-threshold, threshold);
+        }
+    }
+}
+
 fn dot(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
@@ -190,6 +284,8 @@ mod tests {
         name: "tiny",
         layers: 2,
         width: 3,
+        residual_dump: "ffn_out",
+        residual_branches: 1,
     };
 
     fn norm(v: &[f32]) -> f32 {
@@ -242,6 +338,40 @@ mod tests {
         assert!((l0[0] - l0[1]).abs() < 1e-6, "{l0:?}");
         let means = acc.finish(false, false);
         assert!(means.layer(0)[0] > 0.99);
+    }
+
+    #[test]
+    fn each_side_is_averaged_over_its_own_count() {
+        let mut acc = Accumulator::new(TINY);
+        // Targets average to (2,0,0); one control at (0,0,0).
+        acc.add_target(&[1.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
+        acc.add_target(&[3.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
+        acc.add_control(&[0.0, 1.0, 0.0, 0.0, 0.0, 0.0]);
+        let d = acc.finish(false, false);
+        // (2,-1,0) normalized.
+        let n = 5f32.sqrt();
+        assert!((d.layer(0)[0] - 2.0 / n).abs() < 1e-6);
+        assert!((d.layer(0)[1] + 1.0 / n).abs() < 1e-6);
+    }
+
+    #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "the clamped values are exact by construction"
+    )]
+    fn winsorizing_clamps_each_layer_to_its_quantile() {
+        // Layer 0 magnitudes 1,2,3,4,100: the 0.75 quantile sits at rank 3
+        // (4.0); layer 1 at 0.5 between ranks interpolates 2.5 of 1..4.
+        let mut c = [1.0, -2.0, 3.0, 4.0, -100.0];
+        winsorize(&mut c, 5, 0.75);
+        assert_eq!(c, [1.0, -2.0, 3.0, 4.0, -4.0]);
+        let mut c = [1.0, 2.0, 3.0, -4.0];
+        winsorize(&mut c, 4, 0.5);
+        assert_eq!(c, [1.0, 2.0, 2.5, -2.5]);
+        // Quantile 1 clamps nothing.
+        let mut c = [1.0, -9.0, 3.0];
+        winsorize(&mut c, 3, 1.0);
+        assert_eq!(c, [1.0, -9.0, 3.0]);
     }
 
     #[test]

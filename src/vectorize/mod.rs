@@ -35,8 +35,9 @@
 //! ```
 
 mod capture;
+pub mod diff;
 mod direction;
-mod gguf;
+pub mod gguf;
 mod hub;
 mod model;
 mod prompts;
@@ -47,11 +48,27 @@ use std::fmt;
 use std::path::PathBuf;
 
 pub use capture::{Capture, Component, Tick};
-pub use direction::{Accumulator, Direction};
+pub use direction::{Accumulator, Direction, winsorize};
 pub use hub::{Fetch, HF_KEY_VARS, HubCache};
 pub use model::{Model, PROFILES, Profile};
 pub use prompts::PromptSource;
 pub use store::VectorStore;
+
+/// The plank home, as plank resolves it: `~/.plank`, else the machine-wide
+/// `/Users/.plank` when only that exists, else `~/.plank` (or `./.plank`
+/// without `HOME`).
+pub(crate) fn plank_dir() -> PathBuf {
+    let Some(home) = std::env::var_os("HOME") else {
+        return PathBuf::from(".").join(".plank");
+    };
+    let primary = PathBuf::from(home).join(".plank");
+    let shared = PathBuf::from("/Users/.plank");
+    if !primary.is_dir() && shared.is_dir() {
+        shared
+    } else {
+        primary
+    }
+}
 
 /// Anything that stops a steering vector from being built.
 #[derive(Debug)]

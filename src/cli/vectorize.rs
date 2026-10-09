@@ -18,21 +18,34 @@ pt vectorize - build a steering vector from two prompt sets
 
 USAGE:
     pt vectorize <model> --from SRC --to SRC (-n NAME | -o FILE) [OPTIONS]
+    pt vectorize <model> --diff EDITED.gguf (-n NAME | -o FILE) [OPTIONS]
 
 Loads the model once with the ds4 engine linked into pt, runs every prompt
-through it with activation dumps on, and writes one unit
-direction per layer separating the two sets, built as `from - to` and made
-orthogonal to the `to` mean. At runtime a positive scale pushes the model
-towards `to` (it strips the `from` component); a negative scale
-pushes it towards `from`.
+through it with activation dumps on, and writes one unit direction per layer
+separating the two sets. The computation is heretic's (github.com/p-e-w/heretic):
+the residual stream after each layer at the last prompt token, averaged per
+set, `from - to` normalized and made orthogonal to the `to` mean. With
+`--from` as heretic's bad prompts and `--to` as its good ones, the vector is
+heretic's refusal direction. At runtime a positive scale pushes the model
+towards `to` (it strips the `from` component); a negative scale pushes it
+towards `from`.
+
+With --diff, nothing is run: the vector is read out of the weights instead.
+EDITED must be <model> with an abliteration-style edit (W' = W - λ d dᵀ W on
+the matrices that write the residual stream), in the same format and
+quantization. Per layer, the edit's direction d is the top singular vector of
+the weight difference and λ its fitted strength; each row is d scaled by
+√|λ|, so the vector reproduces the edit at scale 1 (-1 for an amplifying
+edit). Only byte-different tensors are dequantized; the fit runs on Metal.
 
 The vector is stored under NAME in ~/.plank/models/vectors.json (created if
-missing), keyed by the model's file name, and/or written to FILE with its
+missing), keyed by the plank engine name, and/or written to FILE with its
 metadata next to it as FILE.json.
 
 ARGS:
-    <model>             plank engine name (ds4vision, qwen, an engines.local.json
-                        entry) or a path to a .gguf file
+    <model>             plank engine name from its catalog (engines.json, plus
+                        ~/.plank/engines.local.json), e.g. ds4vision; a .gguf
+                        path is mapped back to the engine it belongs to
 
 PROMPT SOURCES (SRC):
     path/to/file        Local .txt (one prompt per line, # comments), .jsonl or .json
@@ -49,6 +62,10 @@ PROMPT SOURCES (SRC):
                         beyond the smaller one (or --limit).
 
 OPTIONS:
+        --diff EDITED   Recover the vector from the weights of EDITED, an
+                        edited copy of <model> (replaces --from/--to); with
+                        --component ffn_out or attn_out to pick a component
+                        when the edit touched both
         --from SRC      Baseline prompts; repeat to combine sources
         --to SRC        Target prompts; repeat to combine sources
     -n, --name NAME     Store the vector as NAME for this model in
@@ -61,7 +78,12 @@ OPTIONS:
                         ../share/plank/metal beside the pt binary)
         --profile NAME  Override the shape detected from the model
                         (deepseek-v4-flash, glm-5.3-flash, qwen3.8-flash-next)
-        --component C   ffn_out (default) or attn_out
+        --component C   residual (default; heretic's residual stream after each
+                        layer), ffn_out (ds4 build_direction.py's dump) or
+                        attn_out
+        --winsorize Q   Clamp each capture's per-layer magnitudes to their
+                        Q-quantile before averaging (heretic's
+                        winsorization_quantile; off by default)
         --ctx N         Context size per capture (default: 512)
         --system TEXT   System prompt (default: \"You are a helpful assistant.\")
         --think         Capture after <think> instead of a direct answer
@@ -84,6 +106,8 @@ OPTIONS:
 )]
 struct Args {
     model: String,
+    diff: Option<PathBuf>,
+    component_given: bool,
     from: Vec<PromptSource>,
     to: Vec<PromptSource>,
     out: Option<PathBuf>,
@@ -96,6 +120,7 @@ struct Args {
     ctx: u32,
     system: String,
     think: bool,
+    winsorize: Option<f64>,
     pair_normalize: bool,
     orthogonalize: bool,
     force: bool,
@@ -113,6 +138,8 @@ pub fn run(args: &[String]) -> Result<ExitCode, CliError> {
 fn parse_args(args: &[String]) -> Result<Args, CliError> {
     let usage = |m: String| CliError::Usage(m);
     let mut model = None;
+    let mut diff = None;
+    let mut component_given = false;
     let (mut from, mut to) = (Vec::new(), Vec::new());
     let mut out = None;
     let mut name = None;
@@ -120,7 +147,8 @@ fn parse_args(args: &[String]) -> Result<Args, CliError> {
     let mut column = None;
     let mut metal = None;
     let mut profile = None;
-    let mut component = Component::FfnOut;
+    let mut component = Component::Residual;
+    let mut winsorize = None;
     let mut ctx = 512;
     let mut system = "You are a helpful assistant.".to_string();
     let (mut think, mut pair_normalize, mut orthogonalize) = (false, false, true);
@@ -136,6 +164,7 @@ fn parse_args(args: &[String]) -> Result<Args, CliError> {
         };
         match arg.as_str() {
             "-h" | "--help" => return Err(CliError::Help),
+            "--diff" => diff = Some(PathBuf::from(value("--diff")?)),
             "--from" => from.push(PromptSource::parse(&value("--from")?)),
             "--to" => to.push(PromptSource::parse(&value("--to")?)),
             "-o" | "--out" => out = Some(PathBuf::from(value("--out")?)),
@@ -151,14 +180,13 @@ fn parse_args(args: &[String]) -> Result<Args, CliError> {
             "--metal" => metal = Some(PathBuf::from(value("--metal")?)),
             "--profile" => profile = Some(named_profile(&value("--profile")?)?),
             "--component" => {
-                let v = value("--component")?;
-                component = Component::parse(&v).ok_or_else(|| {
-                    usage(format!("`--component` is ffn_out or attn_out, not `{v}`"))
-                })?;
+                component = named_component(&value("--component")?)?;
+                component_given = true;
             }
             "--ctx" => ctx = positive("--ctx", &value("--ctx")?)?,
             "--system" => system = value("--system")?,
             "--think" => think = true,
+            "--winsorize" => winsorize = Some(quantile(&value("--winsorize")?)?),
             "--pair-normalize" => pair_normalize = true,
             "--no-orthogonalize" => orthogonalize = false,
             "-f" | "--force" => force = true,
@@ -174,9 +202,12 @@ fn parse_args(args: &[String]) -> Result<Args, CliError> {
     }
 
     let model = model.ok_or_else(|| usage("a model name is required".into()))?;
-    if from.is_empty() || to.is_empty() {
-        return Err(usage("both `--from` and `--to` are required".into()));
-    }
+    check_sources(
+        diff.is_some(),
+        &from,
+        &to,
+        component_given.then_some(component),
+    )?;
     if out.is_none() && name.is_none() {
         return Err(usage(
             "say where the vector goes: `-n NAME`, `-o FILE`, or both".into(),
@@ -184,6 +215,8 @@ fn parse_args(args: &[String]) -> Result<Args, CliError> {
     }
     Ok(Args {
         model,
+        diff,
+        component_given,
         from,
         to,
         out,
@@ -196,6 +229,7 @@ fn parse_args(args: &[String]) -> Result<Args, CliError> {
         ctx,
         system,
         think,
+        winsorize,
         pair_normalize,
         orthogonalize,
         force,
@@ -203,6 +237,87 @@ fn parse_args(args: &[String]) -> Result<Args, CliError> {
         refresh,
         no_cache,
     })
+}
+
+/// Checks the prompt sources against the mode: `--diff` takes none, a
+/// capture run needs both sides.
+fn check_sources(
+    diff: bool,
+    from: &[PromptSource],
+    to: &[PromptSource],
+    component: Option<Component>,
+) -> Result<(), CliError> {
+    let usage = |m: &str| Err(CliError::Usage(m.to_string()));
+    if diff {
+        if !from.is_empty() || !to.is_empty() {
+            return usage("`--diff` reads the vector from weights; drop `--from` and `--to`");
+        }
+        if component == Some(Component::Residual) {
+            return usage("`--diff` recovers ffn_out or attn_out directions, not residual");
+        }
+    } else if from.is_empty() || to.is_empty() {
+        return usage("both `--from` and `--to` are required");
+    }
+    Ok(())
+}
+
+/// Refuses to overwrite an existing `-o` file or its sidecar without `-f`.
+fn check_outputs(args: &Args) -> Result<(), CliError> {
+    if let (Some(out), false) = (&args.out, args.force) {
+        for path in [out.clone(), meta_path(out)] {
+            if path.exists() {
+                return Err(format!(
+                    "{} already exists; pass --force to overwrite it",
+                    path.display()
+                )
+                .into());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Hands a `--diff` run to [`super::vecdiff`].
+fn run_diff(
+    args: &Args,
+    model: &Model,
+    profile: Profile,
+    edited: &Path,
+    store: &VectorStore,
+) -> Result<ExitCode, CliError> {
+    super::vecdiff::run(&super::vecdiff::DiffArgs {
+        model_arg: &args.model,
+        model,
+        profile,
+        edited,
+        component: args.component_given.then_some(args.component),
+        out: args.out.as_deref(),
+        name: args.name.as_deref(),
+        store,
+        force: args.force,
+        quiet: args.quiet,
+    })
+}
+
+/// Parses a `--component` name.
+fn named_component(v: &str) -> Result<Component, CliError> {
+    Component::parse(v).ok_or_else(|| {
+        CliError::Usage(format!(
+            "`--component` is residual, ffn_out or attn_out, not `{v}`"
+        ))
+    })
+}
+
+/// Parses a `--winsorize` quantile, strictly between 0 and 1.
+fn quantile(v: &str) -> Result<f64, CliError> {
+    v.parse()
+        .ok()
+        .filter(|q: &f64| *q > 0.0 && *q < 1.0)
+        .ok_or_else(|| {
+            CliError::Usage(format!(
+                "`--winsorize` needs a quantile between 0 and 1, not `{v}`"
+            ))
+        })
 }
 
 /// Looks up a `--profile` name, listing the known ones on a miss.
@@ -229,28 +344,18 @@ fn positive<T: std::str::FromStr + Default + PartialOrd>(
 
 fn vectorize(args: &Args) -> Result<ExitCode, CliError> {
     let failed = |e: plank_tools::vectorize::VectorizeError| CliError::Failed(e.to_string());
-    if let (Some(out), false) = (&args.out, args.force) {
-        for path in [out.clone(), meta_path(out)] {
-            if path.exists() {
-                return Err(format!(
-                    "{} already exists; pass --force to overwrite it",
-                    path.display()
-                )
-                .into());
-            }
-        }
-    }
+    check_outputs(args)?;
 
     // Everything that can fail fast is checked before the model loads, since
     // that alone takes minutes on the large models.
     let model = Model::resolve(&args.model).map_err(failed)?;
     let store = VectorStore::new(VectorStore::default_path());
-    let model_file = model_file_name(&model);
+    let model_key = model.key();
     if let (Some(name), false) = (&args.name, args.force)
-        && store.contains(&model_file, name).map_err(failed)?
+        && store.contains(&model_key, name).map_err(failed)?
     {
         return Err(format!(
-            "{}: `{model_file}` already has a vector named `{name}`; pass --force to replace it",
+            "{}: `{model_key}` already has a vector named `{name}`; pass --force to replace it",
             store.path().display()
         )
         .into());
@@ -259,6 +364,9 @@ fn vectorize(args: &Args) -> Result<ExitCode, CliError> {
         Some(p) => p,
         None => model.profile().map_err(failed)?,
     };
+    if let Some(edited) = &args.diff {
+        return run_diff(args, &model, profile, edited, &store);
+    }
     let capture = Capture::new(model.path(), profile)
         .ctx(args.ctx)
         .system(args.system.clone())
@@ -274,10 +382,14 @@ fn vectorize(args: &Args) -> Result<ExitCode, CliError> {
         }
     };
     say(format!(
-        "model  : {} ({}, {})\nshape  : {} layers x {}  component: {}\nmetal  : {}",
+        "model  : {} ({}, {})\nkey    : {}\nshape  : {} layers x {}  component: {}\nmetal  : {}",
         model.name(),
         model.path().display(),
         model.architecture().unwrap_or("no architecture key"),
+        model.engine().map_or_else(
+            || format!("{} (no plank engine uses this file)", model.key()),
+            |e| format!("{e} (plank engine)"),
+        ),
         profile.layers,
         profile.width,
         args.component,
@@ -313,20 +425,20 @@ fn vectorize(args: &Args) -> Result<ExitCode, CliError> {
         "loaded in {}",
         human(started.elapsed().as_secs_f64())
     ));
-    let acc = capture_pairs(&mut capture, profile, &to, &from, args.quiet).map_err(failed)?;
+    let acc = capture_pairs(
+        &mut capture,
+        profile,
+        &to,
+        &from,
+        args.winsorize,
+        args.quiet,
+    )
+    .map_err(failed)?;
 
     let direction = acc.finish(args.orthogonalize, args.pair_normalize);
     let took = human(started.elapsed().as_secs_f64());
     save(args, &direction, &model, &store, pairs, &took)?;
     Ok(ExitCode::SUCCESS)
-}
-
-/// The `model` key of a store entry: the resolved GGUF's file name.
-fn model_file_name(model: &Model) -> String {
-    model.path().file_name().map_or_else(
-        || model.path().display().to_string(),
-        |n| n.to_string_lossy().into_owned(),
-    )
 }
 
 /// Writes the vector wherever it was asked for and says how to use it.
@@ -359,10 +471,10 @@ fn save(
         );
     }
     if let Some(name) = &args.name {
-        let model_file = model_file_name(model);
-        match store.put(&model_file, name, direction, args.force) {
+        let model_key = model.key();
+        match store.put(&model_key, name, direction, args.force) {
             Ok(replaced) => println!(
-                "{} vector `{name}` for `{model_file}` in {} ({shape})",
+                "{} vector `{name}` for `{model_key}` in {} ({shape})",
                 if replaced { "replaced" } else { "stored" },
                 store.path().display()
             ),
@@ -378,14 +490,21 @@ fn save(
             Err(e) => return Err(failed(e)),
         }
     }
-    if let Some(out) = &args.out {
-        let scale = match args.component {
-            Component::FfnOut => "ffn",
-            Component::AttnOut => "attn",
-        };
+    // A residual direction is applied where heretic ablates against it, to
+    // each layer's FFN output.
+    let scale = match args.component {
+        Component::Residual | Component::FfnOut => "ffn",
+        Component::AttnOut => "attn",
+    };
+    if let Some(name) = &args.name {
         println!(
-            "\nuse it from engines.local.json:\n  \"steering\": {{ \"file\": \"{}\", \"{scale}\": 1 }}   (positive = towards `to`)",
-            absolute(out).display(),
+            "\nuse it in plank (positive = towards `to`):\n  plank --dir-steering {name} --dir-steering-{scale} 1\n  \
+             or in engines.local.json: \"steering\": {{ \"direction\": \"{name}\", \"{scale}\": 1 }}"
+        );
+    } else {
+        // plank loads directions by name from vectors.json only.
+        println!(
+            "\nplank loads directions by name: rerun with -n NAME to store this one in vectors.json"
         );
     }
     Ok(())
@@ -404,6 +523,10 @@ fn write_meta(
         "shape": [profile.layers, profile.width],
         "profile": profile.name,
         "component": args.component.as_str(),
+        "dump": args.component.dump(profile).0,
+        "hc_branches_averaged": args.component.dump(profile).1,
+        "winsorization_quantile": args.winsorize,
+        "method": "heretic: normalize(mean(from) - mean(to)), projected off normalize(mean(to))",
         "thinking": args.think,
         "pair_normalize": args.pair_normalize,
         "orthogonalize_control_mean": args.orthogonalize,
@@ -429,13 +552,21 @@ fn capture_pairs(
     profile: Profile,
     to: &[String],
     from: &[String],
+    winsorize: Option<f64>,
     quiet: bool,
 ) -> Result<Accumulator, plank_tools::vectorize::VectorizeError> {
     let mut progress = Progress::new(to.len().min(from.len()), quiet);
     let mut acc = Accumulator::new(profile);
+    let clamp = |rows: &mut Vec<f32>| {
+        if let Some(q) = winsorize {
+            plank_tools::vectorize::winsorize(rows, profile.width, q);
+        }
+    };
     for (t, f) in to.iter().zip(from) {
-        let t_rows = progress.capture(capture, t, "to")?;
-        let f_rows = progress.capture(capture, f, "from")?;
+        let mut t_rows = progress.capture(capture, t, "to")?;
+        let mut f_rows = progress.capture(capture, f, "from")?;
+        clamp(&mut t_rows);
+        clamp(&mut f_rows);
         // `from` is the target and `to` the control: the vector is
         // `from - to`, orthogonal to the `to` mean, so a positive scale strips
         // the `from` component and moves the model towards `to`.
@@ -748,7 +879,7 @@ fn terminal_cols() -> usize {
 }
 
 /// `FILE.json` beside the vector, or `FILE.meta.json` if FILE is a `.json`.
-fn meta_path(out: &Path) -> PathBuf {
+pub(super) fn meta_path(out: &Path) -> PathBuf {
     let candidate = out.with_extension("json");
     if candidate == out {
         out.with_extension("meta.json")
@@ -757,12 +888,8 @@ fn meta_path(out: &Path) -> PathBuf {
     }
 }
 
-fn absolute(path: &Path) -> PathBuf {
-    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
-}
-
 /// Seconds as `1h 02m`, `3m 05s` or `12s`.
-fn human(secs: f64) -> String {
+pub(super) fn human(secs: f64) -> String {
     #[allow(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
@@ -801,7 +928,7 @@ mod tests {
         assert_eq!(a.model, "qwen");
         assert_eq!(a.to.len(), 2);
         assert!(matches!(a.to[1], PromptSource::Hub { .. }));
-        assert_eq!((a.ctx, a.component), (512, Component::FfnOut));
+        assert_eq!((a.ctx, a.component), (512, Component::Residual));
         assert!(a.orthogonalize && !a.pair_normalize);
     }
 

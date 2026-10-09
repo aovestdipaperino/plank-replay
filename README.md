@@ -182,13 +182,13 @@ pt vectorize ds4vision \
 ```
 
 The vector is stored by name in `~/.plank/models/vectors.json`, which is created on first
-use. The file is a JSON array with one entry per model file, each listing its vectors with
+use. The file is a JSON array with one entry per model, each listing its vectors with
 the raw little-endian `f32` matrix in base64:
 
 ```json
 [
   {
-    "model": "ds4vision.gguf",
+    "model": "ds4vision",
     "vectors": [
       { "name": "succinct", "value": "Pq3vPLnF..." }
     ]
@@ -196,16 +196,22 @@ the raw little-endian `f32` matrix in base64:
 ]
 ```
 
-`model` is the file name of the GGUF the model name resolved to. A model/name pair that
+`model` is the plank engine name, which is what plank looks vectors up by. A GGUF that no
+engine uses is stored under its file name, and plank finds it when run on that file. A
+model/name pair that
 already exists is refused before any work starts, unless `--force` is given to replace it;
 other entries, and any extra fields in them, are left as they were. `-o FILE` writes the raw
 `.f32` file instead, or as well, with a metadata sidecar beside it. If the store cannot be
 written at the end of a long run and no `-o` was given, the vector is saved to
 `./<name>.f32` so the work is not lost.
 
-The model is a plank engine name, resolved the way plank resolves it: a `main.path` in
-`~/.plank/engines.local.json`, else the managed `~/.plank/<name>.gguf`. A path to a `.gguf`
-works too. The vector's shape comes from the GGUF architecture: DeepSeek V4 Flash is
+The model is a plank engine name, resolved through plank's own catalog: the `engines.json`
+shipped in the plank checkout `pt` builds against, the fetched `engines.remote.json` when it
+is newer, and `~/.plank/engines.local.json`, later layers replacing engines by name. An
+engine's file is its local `main.path`, else the managed `~/.plank/<name>.gguf`. A path to a
+`.gguf` works too and is mapped back to its engine when it is that engine's file or carries
+its published file name, so a run on `~/.plank/models/DeepSeek-V4-Flash-…-OutQ8.gguf` is
+stored as `ds4vision`. The vector's shape comes from the GGUF architecture: DeepSeek V4 Flash is
 43 x 4096, GLM 5.3 Flash 45 x 4096, Qwen3.8 Flash Next 48 x 2560. Gemma engines run on
 plank's native engine rather than ds4 and cannot be steered this way.
 
@@ -236,12 +242,33 @@ the cache.
 The two sets are paired line by line and cut to the shorter one, or to `-l`/`--limit`. The
 model is loaded once, which takes seconds to minutes depending on the page cache, and each
 capture after that is a single prefill (about a quarter of a second for a short prompt on
-`ds4vision`). The vector is the difference
-of the two means per layer, `from - to`, made orthogonal to the `to` mean and normalized.
-`--pair-normalize` and `--no-orthogonalize` switch those steps the same way the flags of
-ds4's own `build_direction.py` do, and the result matches that script bit for bit when it
-is given the `from` prompts as `--good-file` and the `to` prompts as `--bad-file`. With `-o`,
-metadata recording the sources and settings is written next to the file as `<out>.json`.
+`ds4vision`).
+
+The computation is [heretic](https://github.com/p-e-w/heretic)'s. Heretic reads the residual
+stream after every layer at the last prompt token (its `hidden_states` for the first
+generated token), averages each prompt set in `f64`, and takes `normalize(bad - good)`,
+then removes the part along `normalize(good)` and normalizes again (its default
+`orthogonalize_direction`). `pt` does the same with `--from` as heretic's bad prompts and
+`--to` as its good ones, under the same default system prompt, and `--winsorize Q` is
+heretic's `winsorization_quantile`. The residual comes from the dump each family keeps for
+it: on DeepSeek V4 that is `hc_ffn_post`, the four hyper-connection branches after each
+layer, averaged into one row the way ds4 itself collapses them for its drafter; on GLM 5.3
+and Qwen3.8 the engine's `ffn_out` dump already is the post-layer residual. Run on the same
+captures, `pt` and heretic's own torch code agree to within float rounding (about 1e-7).
+
+The steps where `pt` necessarily differs are the model and how the vector is used. The
+activations come from ds4's quantized model rather than heretic's transformers checkpoint,
+so the captures themselves differ a little. And heretic bakes the direction into the
+weights, with Optuna searching per-layer strengths and an interpolated layer index, where
+plank applies it at runtime with one scale for every layer; a direction computed here is
+heretic's per-layer case (`direction_index` unset). Heretic ablates both the attention and
+the MLP output of each layer, which in plank is the `attn` and `ffn` scale together.
+
+`--component ffn_out` reads the dump ds4's own `build_direction.py` uses instead, and with
+`--pair-normalize` and `--no-orthogonalize` switching the same steps as that script's flags,
+the result matches it bit for bit when it is given the `from` prompts as `--good-file` and
+the `to` prompts as `--bad-file`. With `-o`, metadata recording the sources and settings is
+written next to the file as `<out>.json`.
 
 ds4 applies the vector as a projection, `y - scale * d * dot(d, y)`, which cannot tell `d`
 from `-d`; what sets the direction of travel is which set the vector is orthogonalized
@@ -249,14 +276,30 @@ against. Building it as `from - to` against the `to` mean leaves `to`-like activ
 zero along it, so a positive scale strips the `from` component and pushes the model towards
 the `to` prompts, and a negative scale pushes it towards `from`:
 
-```json
-"steering": { "file": "/Users/me/.plank/steering/succinct.f32", "ffn": 1 }
 ```
+plank --dir-steering succinct --dir-steering-ffn 1
+```
+
+or, as the default for a local engine in `~/.plank/engines.local.json`:
+
+```json
+"steering": { "direction": "succinct", "ffn": 1 }
+```
+
+plank looks the name up in `vectors.json` under the engine name, and `/steer` alone
+lists the directions stored for the running model.
 
 This is the reverse of `build_direction.py`'s own convention, where the target goes in
 `--good-file` and a negative scale amplifies it. Vectors built before this change, such as
 a heretic vector with harmful prompts as `--to`, keep their old meaning; rebuild them with
 `--to` and `--from` as the side to move towards and the side to move away from.
+
+Heretic's own setup, 400 prompts from each of its default datasets, is:
+
+```
+pt vectorize ds4vision --from mlabonne:harmful_behaviors --to mlabonne:harmless_alpaca -l 400 -n heretic
+plank --dir-steering heretic --dir-steering-ffn 1 --dir-steering-attn 1
+```
 
 The ds4 engine is linked into `pt` through plank's `local-inference-engine` crate, which builds it from
 `refs/ds4` in a plank checkout beside this repository (`../plank`); no ds4 binary is
@@ -266,6 +309,41 @@ and finds them the way plank does: `--metal DIR`, then `$DS4_METAL_DIR`, then th
 `pt` binary. Without kernels the run stops before downloading anything. The kernels must
 come from the same ds4 version `pt` was built with. Like plank, the engine holds
 `/tmp/ds4.lock` while loaded, so quit a running plank or ds4 first.
+
+### Recovering a vector from an edited model
+
+When an abliterated (or otherwise rank-one edited) copy of a model already exists, the
+vector can be read out of the weights instead of captured from prompts:
+
+```
+pt vectorize ds4vision --diff DeepSeek-V4-Flash-Vision-Exp-Abliterated.gguf -n abliterated
+```
+
+Abliteration replaces each matrix that writes the residual stream (`attn_output_b` or
+`attn_output` for attention; `ffn_down`, `ffn_down_exps` and `ffn_down_shexp` for the FFN)
+with `W - λ d dᵀ W`. The difference between the two files is then rank one per layer, its
+top singular vector is `d`, and ds4's runtime projection on `attn_out` or `ffn_out` with
+that `d` at scale `λ` is the same edit. `pt` compares every tensor byte for byte, dequantizes
+only the changed writers (F32, F16, BF16, Q4_0 to Q8_0 and the K quants; per routed expert),
+accumulates `ΔΔᵀ`, `WWᵀ` and `ΔWᵀ` per layer on Metal, and takes `d` from the first and a
+signed least-squares `λ` from the other two, which rounding noise from re-quantizing does
+not bias. Each row of the vector is `d` scaled by `√|λ|`, so the edit is reproduced at scale
+1 (or -1 when the edit amplified the direction) and untouched layers are zero rows.
+
+The two files must share format and quantization: the same base, with only the edit
+between them. For every changed layer `pt` prints `λ`, the share of the change lying along
+`d` (100% for a clean rank-one edit; requantization noise and norm-preserving variants lower
+it) and the second singular value relative to the first, and it lists changed tensors the
+vector cannot carry, such as embeddings or the output head. When the edit touched both
+attention and FFN, `--component attn_out` or `ffn_out` picks one, since ds4 takes one
+vector per run.
+
+On the published Vision-Exp abliteration (33 `Q8_0` `attn_output_b` tensors, recipe
+λ = 3.5 with row norms preserved), the run takes about 30 seconds, finds exactly layers
+10 to 42 with λ between 3.32 and 3.41 and about 88% of each change along one direction, and
+the base model steered with the result answers like the abliterated one: on refusal
+prompts its next-token distribution moved from a total-variation distance of 0.98 from the
+abliterated model's to under 0.1.
 
 ## What gets replayed
 
