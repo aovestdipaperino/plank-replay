@@ -160,7 +160,7 @@ pub struct Pass {
     pub stop: String,
 }
 
-/// Everything the `--stats` report needs, collected in one pass over the file.
+/// Everything the `pt stats` report needs, collected in one pass over the file.
 #[derive(Debug, Default)]
 pub struct Stats {
     /// Header metadata, `key: value`, from every `- key: value` line.

@@ -13,7 +13,7 @@ If a session spent an hour building a Rust project across seven `write` calls an
 a sequence of instructions that, applied in order, would produce them. Reading the repro
 tells you what happened; it does not give you something you can compile.
 
-plank-replay closes that gap. It reads the transcript, decodes the tool calls the model
+`pt replay` closes that gap. It reads the transcript, decodes the tool calls the model
 emitted, and applies them to a fresh directory, so the session's output becomes a real
 tree you can build, test, diff against another run, or hand to someone else.
 
@@ -87,7 +87,7 @@ mistakes loud.
 
 A plain edit carries `old` and `new`. The `old` text must occur exactly once in the
 current file. Zero matches is a failure and so is two, because an edit that could land in
-either of two places is an edit whose author did not mean what they wrote. plank-replay
+either of two places is an edit whose author did not mean what they wrote. `pt replay`
 counts matches and refuses the same way.
 
 The anchored form replaces a whole span without quoting it. The `old` text is split on
@@ -178,7 +178,7 @@ end-to-end check is stronger still: replay a session that built a Rust project, 
 
 ## Summarising a session
 
-`--stats` answers a different question from a replay: not "what did this session build"
+`pt stats` answers a different question from a replay: not "what did this session build"
 but "how did it go". It shares the parser and adds nothing to the effects layer, because
 the report is read-only by construction — `stats` takes the document and the decoded event
 stream and returns a string.
@@ -234,7 +234,7 @@ text — so the page stays greppable by default when it is redirected.
 
 ## What this is not
 
-plank-replay reconstructs files, not sessions. It does not re-run the model, does not
+`pt replay` reconstructs files, not sessions. It does not re-run the model, does not
 reproduce timing or token accounting, and cannot recover a file whose contents never
 appeared in the transcript. It is a way to get from a report about work to the work
 itself.

@@ -1,14 +1,25 @@
 [package]
-name = "plank-replay"
+name = "plank-tools"
 version = "0.1.0"
 edition = "2024"
 authors = ["Enzo Lombardi <enzinol@gmail.com>"]
-description = "Parses plank repro files and replays their file edits to reconstruct the workspace"
-repository = "https://github.com/aovestdipaperino/plank-replay"
+description = "Tools for plank repro files: replay their file edits, summarise and browse sessions"
+repository = "https://github.com/aovestdipaperino/plank-tools"
 license = "MIT"
 
+[[bin]]
+name = "pt"
+path = "src/main.rs"
+
 [dependencies]
+# plank's local inference crate, linked in-process: its build script compiles
+# the ds4 C engine from plank's refs/ds4. Expects plank checked out beside this
+# repo. Gemma support is left off: activation capture is ds4-only, and the
+# Gemma backend would pull in candle for nothing.
+local-inference-engine = { path = "../plank/crates/local-inference-engine", default-features = false }
+libc = "0.2"
 arboard = "3"
+serde_json = "1"
 
 [lints.rust]
 missing_debug_implementations = "warn"

@@ -142,7 +142,7 @@ struct Browser {
     style: Style,
 }
 
-/// Browses `dir`, painting each repro's `--stats` report beside the list.
+/// Browses `dir`, painting each repro's `pt stats` report beside the list.
 ///
 /// Returns once the user quits with `q`. `colour` switches the ANSI palette off
 /// for terminals that asked for no colour.
@@ -155,7 +155,7 @@ struct Browser {
 /// # Examples
 ///
 /// ```no_run
-/// plank_replay::browse::browse(std::path::Path::new("/tmp/repro"), true)?;
+/// plank_tools::browse::browse(std::path::Path::new("/tmp/repro"), true)?;
 /// # Ok::<(), String>(())
 /// ```
 pub fn browse(dir: &Path, colour: bool) -> Result<(), String> {
@@ -561,7 +561,7 @@ fn when(stats: &Stats) -> String {
 /// Builds the block the panel opens with: prompt, model, skills, when, and time.
 ///
 /// These answer "what was asked, of what, with skills or not, when, and for how
-/// long" at a glance, so they lead the panel; the full `--stats` report follows
+/// long" at a glance, so they lead the panel; the full `pt stats` report follows
 /// underneath.
 fn headline(stats: &Stats, style: Style) -> Vec<String> {
     let mut lines = Vec::with_capacity(HEADLINE_PROMPT + 6);

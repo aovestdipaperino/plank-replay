@@ -149,9 +149,9 @@ impl Call {
 /// # Examples
 ///
 /// ```no_run
-/// let repro = plank_replay::parse_repro("repro-debug-1789376559.md")?;
+/// let repro = plank_tools::parse_repro("repro-debug-1789376559.md")?;
 /// println!("{} calls", repro.calls().len());
-/// # Ok::<(), plank_replay::ReplayError>(())
+/// # Ok::<(), plank_tools::ReplayError>(())
 /// ```
 pub fn parse_repro(path: impl AsRef<Path>) -> Result<Repro, ReplayError> {
     let path = path.as_ref();

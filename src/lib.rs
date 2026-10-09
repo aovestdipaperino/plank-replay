@@ -12,6 +12,7 @@ pub mod parse;
 pub mod replay;
 pub mod seed;
 pub mod stats;
+pub mod vectorize;
 
 pub use browse::browse;
 pub use error::ReplayError;

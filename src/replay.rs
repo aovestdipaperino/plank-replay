@@ -373,7 +373,7 @@ mod tests {
 
     fn tmp(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "plank-replay-test-{label}-{}-{:?}",
+            "plank-tools-test-{label}-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));
