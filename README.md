@@ -434,6 +434,9 @@ for report in &reports {
     println!("{}", report.outcome);
 }
 # Ok::<(), plank_tools::ReplayError>(())
+
+[![GitHub stars](https://img.shields.io/github/stars/aovestdipaperino/plank-replay?logo=github&color=brightgreen)](https://github.com/aovestdipaperino/plank-replay/stargazers)
+
 ```
 
 ## Design
